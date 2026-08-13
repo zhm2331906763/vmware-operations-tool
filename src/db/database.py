@@ -9,6 +9,7 @@ class Database:
     _instance = None
     _lock = threading.Lock()
     ALLOWED_HISTORY_TABLES = {'host_inspect', 'local_disk_inspect', 'vm_inspect', 'host_disk'}
+    INSPECTION_DATA_TABLES = ('host_inspect', 'host_disk', 'local_disk_inspect', 'vm_inspect')
 
     def __new__(cls):
         if cls._instance is None:
@@ -223,9 +224,57 @@ class Database:
         with self._lock:
             conn = self.get_connection()
             cursor = conn.cursor()
-            cursor.execute('DELETE FROM vcenter_config WHERE id = ?', (vc_id,))
-            conn.commit()
-            conn.close()
+            try:
+                cursor.execute('SELECT ip FROM vcenter_config WHERE id = ?', (vc_id,))
+                row = cursor.fetchone()
+                if row:
+                    self._delete_inspection_data(cursor, row[0])
+                cursor.execute('DELETE FROM vcenter_config WHERE id = ?', (vc_id,))
+                conn.commit()
+            finally:
+                conn.close()
+
+    @classmethod
+    def _delete_inspection_data(cls, cursor, vc_ip):
+        """Delete all persisted inspection data belonging to one vCenter."""
+        for table_name in cls.INSPECTION_DATA_TABLES:
+            cursor.execute(f'DELETE FROM {table_name} WHERE vc_ip = ?', (vc_ip,))
+
+    def sync_inspection_data_with_vcenters(self, active_vc_ips=None):
+        """Remove inspection rows whose vCenter is no longer configured.
+
+        ``active_vc_ips`` can be passed by a caller that already captured the
+        current vCenter list. If omitted, the configured list is read in the
+        same database transaction as the cleanup.
+        """
+        with self._lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            try:
+                if active_vc_ips is None:
+                    cursor.execute('SELECT ip FROM vcenter_config')
+                    active_vc_ips = {row[0] for row in cursor.fetchall() if row[0]}
+                else:
+                    active_vc_ips = {str(ip).strip() for ip in active_vc_ips if ip}
+                active_vc_ips = tuple(sorted(active_vc_ips))
+
+                deleted_rows = 0
+                for table_name in self.INSPECTION_DATA_TABLES:
+                    if active_vc_ips:
+                        placeholders = ', '.join('?' for _ in active_vc_ips)
+                        cursor.execute(
+                            f'DELETE FROM {table_name} '
+                            f'WHERE vc_ip IS NULL OR vc_ip NOT IN ({placeholders})',
+                            tuple(active_vc_ips)
+                        )
+                    else:
+                        cursor.execute(f'DELETE FROM {table_name}')
+                    deleted_rows += cursor.rowcount
+
+                conn.commit()
+                return deleted_rows
+            finally:
+                conn.close()
 
     def update_vcenter(self, vc_id, ip, user, password, remark, root_password='', region=''):
         with self._lock:

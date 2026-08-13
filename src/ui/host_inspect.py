@@ -490,7 +490,9 @@ class HostInspectPage:
                 collector = HostCollector(connector)
                 hosts = collector.collect_all_hosts()
 
-                self.db.save_host_inspect(hosts)
+                # Replace this vCenter's snapshot even when the current result
+                # is empty, so stale hosts cannot survive a completed run.
+                self.db.save_host_inspect(hosts, vc_ip=vc_ip)
                 connector.disconnect()
 
                 elapsed = time.time() - start_time
@@ -585,6 +587,12 @@ class HostInspectPage:
 
     def _start_all_inspect(self):
         vcenters = self.db.get_vcenters()
+        active_vc_ips = {vc[1] for vc in vcenters if len(vc) > 1 and vc[1]}
+        removed_rows = self.db.sync_inspection_data_with_vcenters(active_vc_ips)
+        if removed_rows:
+            self._log(f"已清理 {removed_rows} 条已删除vCenter的巡检记录")
+            self.parent.after(0, self._refresh_vc_list)
+
         if not vcenters:
             messagebox.showwarning("提示", "没有已添加的vCenter")
             return
@@ -615,7 +623,8 @@ class HostInspectPage:
                 progress.update_status(f"正在采集 {vc_ip} 主机数据...")
                 collector = HostCollector(connector)
                 hosts = collector.collect_all_hosts()
-                self.db.save_host_inspect(hosts)
+                # Each result is a complete snapshot for this configured VC.
+                self.db.save_host_inspect(hosts, vc_ip=vc_ip)
                 connector.disconnect()
 
                 self.parent.after(0, lambda ip=vc_ip, h=len(hosts): self._log(f"{ip} 采集完成，共 {h} 台主机"))
@@ -646,6 +655,12 @@ class HostInspectPage:
                     result = future.result()
                     results.append(result)
                     total_hosts[0] += result['hosts']
+
+            # Reconcile again in case a vCenter was deleted while the run was
+            # in progress, or legacy data was written by an older build.
+            removed_rows = self.db.sync_inspection_data_with_vcenters()
+            if removed_rows:
+                self._log(f"巡检结束后清理 {removed_rows} 条无效vCenter巡检记录")
 
             elapsed = int(time.time() - start_time)
             minutes = elapsed // 60
