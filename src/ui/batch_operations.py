@@ -12,6 +12,10 @@ from src.core.vm_operations import VMRenamer, VMRemarkUpdater
 from src.core.dvswitch_manager import DVSwitchManager
 from src.core.concurrent_config import ConcurrentConfig
 from src.ui.theme import COLORS, FONTS
+from src.core.esxi_host_manager import ESXiHostManager
+from src.core.vm_disk_manager import VMDiskManager
+from src.core.vm_resize_manager import VMResizeManager
+from src.ui.theme import COLORS, FONTS
 from src.ui.enhanced_widgets import EnhancedButton, ProgressDialog
 from openpyxl import load_workbook
 
@@ -22,6 +26,13 @@ class BatchOperationsPage:
         self.app = app
         self.db = Database()
         self._create_ui()
+
+    def set_operation(self, operation_key):
+        if not hasattr(self, "operation_var"):
+            return
+        if operation_key:
+            self.operation_var.set(operation_key)
+            self._on_operation_change()
 
     def _create_ui(self):
         op_frame = ttk.LabelFrame(self.parent, text="批量操作类型", padding=10, style='Card.TLabelframe')
@@ -39,6 +50,16 @@ class BatchOperationsPage:
                        value="rename", command=self._on_operation_change).pack(side=tk.LEFT, padx=10)
         ttk.Radiobutton(op_frame, text="🔀 创建分布式交换机", variable=self.operation_var,
                        value="dvswitch", command=self._on_operation_change).pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(op_frame, text="🔐 ESXi证书续订", variable=self.operation_var,
+                       value="cert", command=self._on_operation_change).pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(op_frame, text="🔌 开启SSH", variable=self.operation_var,
+                       value="ssh", command=self._on_operation_change).pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(op_frame, text="🕐 配置NTP", variable=self.operation_var,
+                       value="ntp", command=self._on_operation_change).pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(op_frame, text="💾 添加硬盘", variable=self.operation_var,
+                       value="add_disk", command=self._on_operation_change).pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(op_frame, text="🧩 CPU内存扩容", variable=self.operation_var,
+                       value="resize", command=self._on_operation_change).pack(side=tk.LEFT, padx=10)
 
         file_frame = ttk.Frame(self.parent)
         file_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -89,7 +110,12 @@ class BatchOperationsPage:
             'migrate': 'vmotion.xlsx',
             'remark': 'modify_remark.xlsx',
             'rename': 'rename.xlsx',
-            'dvswitch': 'distributed_switch.xlsx'
+            'dvswitch': 'distributed_switch.xlsx',
+            'cert': 'esxi_cert.xlsx',
+            'ssh': 'esxi_ssh.xlsx',
+            'ntp': 'esxi_ntp.xlsx',
+            'add_disk': 'vm_add_disk.xlsx',
+            'resize': 'vm_resize.xlsx'
         }
         self.current_template = templates.get(op, '')
 
@@ -197,6 +223,16 @@ class BatchOperationsPage:
                     local_success, local_failed = self._execute_rename(connector, config_list)
                 elif op == "dvswitch":
                     local_success, local_failed = self._execute_dvswitch(connector, config_list)
+                elif op == "cert":
+                    local_success, local_failed = self._execute_cert(connector, config_list)
+                elif op == "ssh":
+                    local_success, local_failed = self._execute_ssh(connector, config_list)
+                elif op == "ntp":
+                    local_success, local_failed = self._execute_ntp(connector, config_list)
+                elif op == "add_disk":
+                    local_success, local_failed = self._execute_add_disk(connector, config_list)
+                elif op == "resize":
+                    local_success, local_failed = self._execute_resize(connector, config_list)
 
                 connector.disconnect()
                 return local_success, local_failed
@@ -269,6 +305,58 @@ class BatchOperationsPage:
                         'new_name': str(row[2]).strip()
                     })
 
+        elif op == "cert":
+            for row in rows[1:]:
+                if len(row) >= 2 and row[0] and row[1]:
+                    configs.append({
+                        'vc_ip': str(row[0]).strip(),
+                        'esxi_host': str(row[1]).strip()
+                    })
+
+        elif op == "ssh":
+            for row in rows[1:]:
+                if len(row) >= 2 and row[0] and row[1]:
+                    configs.append({
+                        'vc_ip': str(row[0]).strip(),
+                        'esxi_host': str(row[1]).strip()
+                    })
+
+        elif op == "ntp":
+            for row in rows[1:]:
+                if len(row) >= 3 and row[0] and row[1] and row[2]:
+                    configs.append({
+                        'vc_ip': str(row[0]).strip(),
+                        'esxi_host': str(row[1]).strip(),
+                        'ntp_servers': str(row[2]).strip()
+                    })
+
+        elif op == "add_disk":
+            for row in rows[1:]:
+                if len(row) >= 4 and row[0] and row[1] and row[2] and row[3]:
+                    vm_name = str(row[1]).strip()
+                    disk_sizes_str = str(row[2]).strip()
+                    datastore = str(row[3]).strip()
+                    disk_sizes = [s.strip() for s in disk_sizes_str.split('\n') if s.strip()]
+                    configs.append({
+                        'vc_ip': str(row[0]).strip(),
+                        'vm_name': vm_name,
+                        'disk_sizes': disk_sizes,
+                        'datastore': datastore
+                    })
+        elif op == "resize":
+            for row in rows[1:]:
+                if len(row) >= 2 and row[0] and row[1]:
+                    cpu_count = self._parse_optional_positive_int(row[2] if len(row) > 2 else None)
+                    memory_gb = self._parse_optional_positive_int(row[3] if len(row) > 3 else None)
+                    if cpu_count is None and memory_gb is None:
+                        continue
+                    configs.append({
+                        'vc_ip': str(row[0]).strip(),
+                        'vm_name': str(row[1]).strip(),
+                        'cpu_count': cpu_count,
+                        'memory_gb': memory_gb
+                    })
+
         return configs
 
     def _read_dvswitch_excel(self, file_path):
@@ -317,10 +405,14 @@ class BatchOperationsPage:
         fail_count = 0
 
         def iscsi_single(config):
-            success, msg = manager.add_iscsi_target(config['esxi_host'], config['target_ips'])
+            success, msg = manager.add_iscsi_target(
+                esxi_host_name=config['esxi_host'],
+                target_ips=config['target_ips'],
+                target_iqn=config.get('target_iqn')
+            )
             return (config['esxi_host'], success, msg)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
             futures = [executor.submit(iscsi_single, config) for config in config_list]
             for future in concurrent.futures.as_completed(futures):
                 host, ok, msg = future.result()
@@ -346,7 +438,7 @@ class BatchOperationsPage:
             )
             return (config['vm_name'], success, msg)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
             futures = [executor.submit(migrate_single, config) for config in config_list]
             for future in concurrent.futures.as_completed(futures):
                 vm_name, ok, msg = future.result()
@@ -368,7 +460,7 @@ class BatchOperationsPage:
             success, msg = updater.update_remark(config['vm_name'], config['remark'])
             return (config['vm_name'], success, msg)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
             futures = [executor.submit(remark_single, config) for config in config_list]
             for future in concurrent.futures.as_completed(futures):
                 vm_name, ok, msg = future.result()
@@ -390,7 +482,7 @@ class BatchOperationsPage:
             success, msg = renamer.rename_vm(config['vm_name'], config['new_name'])
             return (config['vm_name'], config['new_name'], success, msg)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
             futures = [executor.submit(rename_single, config) for config in config_list]
             for future in concurrent.futures.as_completed(futures):
                 vm_name, new_name, ok, msg = future.result()
@@ -443,6 +535,141 @@ class BatchOperationsPage:
                     fail_count += 1
 
         return success_count, fail_count
+
+    def _execute_cert(self, connector, config_list):
+        manager = ESXiHostManager(connector)
+        success_count = 0
+        fail_count = 0
+
+        def cert_single(config):
+            success, msg = manager.update_certificate(config['esxi_host'])
+            return (config['esxi_host'], success, msg)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            futures = [executor.submit(cert_single, config) for config in config_list]
+            for future in concurrent.futures.as_completed(futures):
+                host, ok, msg = future.result()
+                self._add_result(len(self.tree.get_children()) + 1, "成功" if ok else "失败",
+                               f"{host}: {msg}", "success" if ok else "failure")
+                if ok:
+                    success_count += 1
+                else:
+                    fail_count += 1
+
+        return success_count, fail_count
+
+    def _execute_ssh(self, connector, config_list):
+        manager = ESXiHostManager(connector)
+        success_count = 0
+        fail_count = 0
+
+        def ssh_single(config):
+            success, msg = manager.enable_ssh(config['esxi_host'])
+            return (config['esxi_host'], success, msg)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            futures = [executor.submit(ssh_single, config) for config in config_list]
+            for future in concurrent.futures.as_completed(futures):
+                host, ok, msg = future.result()
+                self._add_result(len(self.tree.get_children()) + 1, "成功" if ok else "失败",
+                               f"{host}: {msg}", "success" if ok else "failure")
+                if ok:
+                    success_count += 1
+                else:
+                    fail_count += 1
+
+        return success_count, fail_count
+
+    def _execute_ntp(self, connector, config_list):
+        manager = ESXiHostManager(connector)
+        success_count = 0
+        fail_count = 0
+
+        def ntp_single(config):
+            success, msg = manager.config_ntp(config['esxi_host'], config['ntp_servers'])
+            return (config['esxi_host'], success, msg)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            futures = [executor.submit(ntp_single, config) for config in config_list]
+            for future in concurrent.futures.as_completed(futures):
+                host, ok, msg = future.result()
+                self._add_result(len(self.tree.get_children()) + 1, "成功" if ok else "失败",
+                               f"{host}: {msg}", "success" if ok else "failure")
+                if ok:
+                    success_count += 1
+                else:
+                    fail_count += 1
+
+        return success_count, fail_count
+
+    def _execute_add_disk(self, connector, config_list):
+        manager = VMDiskManager(connector)
+        success_count = 0
+        fail_count = 0
+
+        def disk_single(config):
+            vm_name = config['vm_name']
+            disk_sizes = config['disk_sizes']
+            datastore = config['datastore']
+            results = manager.add_multiple_disks(vm_name, disk_sizes, datastore)
+            ok = all(r[1] for r in results)
+            msg = "; ".join([f"{r[0]}GB:{r[2]}" for r in results])
+            return (vm_name, ok, msg)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            futures = [executor.submit(disk_single, config) for config in config_list]
+            for future in concurrent.futures.as_completed(futures):
+                vm, ok, msg = future.result()
+                self._add_result(len(self.tree.get_children()) + 1, "成功" if ok else "失败",
+                               f"{vm}: {msg}", "success" if ok else "failure")
+                if ok:
+                    success_count += 1
+                else:
+                    fail_count += 1
+
+        return success_count, fail_count
+
+    def _execute_resize(self, connector, config_list):
+        manager = VMResizeManager(connector)
+        success_count = 0
+        fail_count = 0
+
+        def resize_single(config):
+            success, msg = manager.resize_vm_resources(
+                vm_name=config['vm_name'],
+                cpu_count=config.get('cpu_count'),
+                memory_gb=config.get('memory_gb')
+            )
+            return (config['vm_name'], success, msg)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            futures = [executor.submit(resize_single, config) for config in config_list]
+            for future in concurrent.futures.as_completed(futures):
+                vm_name, ok, msg = future.result()
+                self._add_result(
+                    len(self.tree.get_children()) + 1,
+                    "成功" if ok else "失败",
+                    f"{vm_name}: {msg}",
+                    "success" if ok else "failure"
+                )
+                if ok:
+                    success_count += 1
+                else:
+                    fail_count += 1
+
+        return success_count, fail_count
+
+    def _parse_optional_positive_int(self, value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        if text == '':
+            return None
+        try:
+            number = int(float(text))
+            return number if number > 0 else None
+        except Exception:
+            return None
 
     def _add_result(self, index, status, detail, tag='info'):
         self.tree.insert('', tk.END, values=(index, status, detail), tags=(tag,))

@@ -1,30 +1,43 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
 import os
+import tkinter as tk
+from tkinter import messagebox, ttk
+
+from src.core.power_scheduler import PowerTaskScheduler
+from src.core.power_task_store import PowerTaskStore
+from src.core.scheduler import TaskScheduler
 from src.db.database import Database
-from src.ui.theme import apply_theme, TAB_ICONS, COLORS, FONTS
-from src.ui.enhanced_widgets import EnhancedStatusBar
-from src.ui.vc_manager import VCManagerPage
-from src.ui.host_inspect import HostInspectPage
-from src.ui.vm_inspect import VMInspectPage
 from src.ui.batch_operations import BatchOperationsPage
 from src.ui.clone import ClonePage
+from src.ui.enhanced_widgets import EnhancedStatusBar
+from src.ui.host_inspect import HostInspectPage
+from src.ui.information_query import InformationQueryPage
+from src.ui.schedule import InspectionScheduleTab, PowerTaskTab
+from src.ui.theme import FONTS, apply_theme
+from src.ui.vc_manager import VCManagerPage
+from src.ui.vcenter_cert import VCenterCertPage
+from src.ui.vm_inspect import VMInspectPage
 
 
 class VCenterManagerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Vcenter管理巡检工具-CSDN:小周学学学")
+        self.root.title("VCenter管理巡检工具")
         self.root.geometry("1400x850")
         self.root.minsize(1200, 700)
 
         apply_theme(root)
 
         self.db = Database()
+        self.inspection_scheduler = TaskScheduler(self)
+        self.power_store = PowerTaskStore()
+        self.power_scheduler = PowerTaskScheduler(self, store=self.power_store, db=self.db)
 
         self._create_menu()
         self._create_ui()
         self._init_templates()
+
+        self.inspection_scheduler.start()
+        self.power_scheduler.start()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -33,50 +46,78 @@ class VCenterManagerApp:
         self.root.config(menu=menubar)
 
         file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="📁 文件", menu=file_menu)
+        menubar.add_cascade(label="文件", menu=file_menu)
         file_menu.add_command(label="退出", command=self._on_closing)
 
         help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="❓ 帮助", menu=help_menu)
-        help_menu.add_command(label="📖 使用说明", command=self._show_help)
-        help_menu.add_command(label="ℹ️ 关于", command=self._show_about)
+        menubar.add_cascade(label="帮助", menu=help_menu)
+        help_menu.add_command(label="使用说明", command=self._show_help)
+        help_menu.add_command(label="关于", command=self._show_about)
 
     def _create_ui(self):
-        toolbar = ttk.Frame(self.root, style='Toolbar.TFrame')
+        toolbar = ttk.Frame(self.root, style="Toolbar.TFrame")
         toolbar.pack(fill=tk.X, padx=5, pady=5)
 
         title_label = ttk.Label(
             toolbar,
-            text="🖥️ Vcenter管理巡检工具",
-            font=FONTS['title']
+            text="VCenter管理巡检工具",
+            font=FONTS["title"],
         )
         title_label.pack(side=tk.LEFT, padx=10)
 
-        self.notebook = ttk.Notebook(self.root, style='Main.TNotebook')
+        self.notebook = ttk.Notebook(self.root, style="Main.TNotebook")
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        self.vc_page = ttk.Frame(self.notebook, style='Card.TFrame')
-        self.notebook.add(self.vc_page, text=f" {TAB_ICONS['vCenter管理']} vCenter管理")
+        self.vc_page = ttk.Frame(self.notebook, style="Card.TFrame")
+        self.notebook.add(self.vc_page, text="vCenter管理")
         self.vc_manager = VCManagerPage(self.vc_page, self)
         self.vc_manager.set_refresh_callback(self._on_vc_changed)
 
-        self.host_page = ttk.Frame(self.notebook, style='Card.TFrame')
-        self.notebook.add(self.host_page, text=f" {TAB_ICONS['ESXi主机巡检']} ESXi主机巡检")
+        self.host_page = ttk.Frame(self.notebook, style="Card.TFrame")
+        self.notebook.add(self.host_page, text="ESXi主机巡检")
         self.host_inspect = HostInspectPage(self.host_page, self)
 
-        self.vm_page = ttk.Frame(self.notebook, style='Card.TFrame')
-        self.notebook.add(self.vm_page, text=f" {TAB_ICONS['虚拟机巡检']} 虚拟机巡检")
+        self.vm_page = ttk.Frame(self.notebook, style="Card.TFrame")
+        self.notebook.add(self.vm_page, text="虚拟机巡检")
         self.vm_inspect = VMInspectPage(self.vm_page, self)
 
-        self.batch_page = ttk.Frame(self.notebook, style='Card.TFrame')
-        self.notebook.add(self.batch_page, text=f" {TAB_ICONS['批量操作']} 批量操作")
-        BatchOperationsPage(self.batch_page, self)
+        self.batch_page = ttk.Frame(self.notebook, style="Card.TFrame")
+        self.notebook.add(self.batch_page, text="批量操作")
+        self.batch_operations = BatchOperationsPage(self.batch_page, self)
 
-        self.clone_page = ttk.Frame(self.notebook, style='Card.TFrame')
-        self.notebook.add(self.clone_page, text=f" {TAB_ICONS['虚拟机克隆']} 虚拟机克隆")
+        self.clone_page = ttk.Frame(self.notebook, style="Card.TFrame")
+        self.notebook.add(self.clone_page, text="虚拟机克隆")
         ClonePage(self.clone_page, self)
 
-        self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
+        self.vcenter_cert_page = ttk.Frame(self.notebook, style="Card.TFrame")
+        self.notebook.add(self.vcenter_cert_page, text="VCenter证书查询及续订")
+        self.vcenter_cert = VCenterCertPage(self.vcenter_cert_page, self)
+
+        self.inspection_schedule_page = ttk.Frame(self.notebook, style="Card.TFrame")
+        self.notebook.add(self.inspection_schedule_page, text="定时巡检")
+        self.inspection_schedule = InspectionScheduleTab(
+            self.inspection_schedule_page,
+            self,
+            self.db,
+            self.inspection_scheduler,
+        )
+
+        self.power_task_page = ttk.Frame(self.notebook, style="Card.TFrame")
+        self.notebook.add(self.power_task_page, text="定时开关机")
+        self.power_task = PowerTaskTab(
+            self.power_task_page,
+            self,
+            self.db,
+            self.power_store,
+            self.power_scheduler,
+        )
+
+        self.information_query_page = ttk.Frame(self.notebook, style="Card.TFrame")
+        self.notebook.add(self.information_query_page, text="信息查询")
+        self.information_query = InformationQueryPage(self.information_query_page, self)
+        self.information_query.pack(fill=tk.BOTH, expand=True)
+
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         status_frame = ttk.Frame(self.root)
         status_frame.pack(fill=tk.X, padx=5, pady=(0, 2))
@@ -91,21 +132,34 @@ class VCenterManagerApp:
         self._refresh_all_vc_lists()
 
     def _refresh_all_vc_lists(self):
-        if hasattr(self, 'host_inspect'):
+        if hasattr(self, "host_inspect"):
             self.host_inspect._refresh_vc_list()
-        if hasattr(self, 'vm_inspect'):
+        if hasattr(self, "vm_inspect"):
             self.vm_inspect._refresh_vc_list()
+        if hasattr(self, "vcenter_cert"):
+            self.vcenter_cert._refresh_vc_list()
+        if hasattr(self, "inspection_schedule"):
+            self.inspection_schedule.load_tasks()
+        if hasattr(self, "power_task"):
+            self.power_task.load_tasks()
+
+    def open_batch_operation(self, operation_key):
+        if hasattr(self, "batch_operations"):
+            self.batch_operations.set_operation(operation_key)
+        if hasattr(self, "notebook") and hasattr(self, "batch_page"):
+            self.notebook.select(self.batch_page)
 
     def _init_templates(self):
-        template_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
+        template_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
         os.makedirs(template_dir, exist_ok=True)
 
         templates = {
-            'iscsi.xlsx': self._get_iscsi_template(),
-            'vmotion.xlsx': self._get_vmotion_template(),
-            'modify_remark.xlsx': self._get_remark_template(),
-            'rename.xlsx': self._get_rename_template(),
-            'vm_clone.xlsx': self._get_clone_template()
+            "iscsi.xlsx": self._get_iscsi_template(),
+            "vmotion.xlsx": self._get_vmotion_template(),
+            "modify_remark.xlsx": self._get_remark_template(),
+            "rename.xlsx": self._get_rename_template(),
+            "vm_clone.xlsx": self._get_clone_template(),
+            "vm_resize.xlsx": self._get_vm_resize_template(),
         }
 
         for filename, data in templates.items():
@@ -115,6 +169,7 @@ class VCenterManagerApp:
 
     def _create_template_file(self, filepath, data):
         from openpyxl import Workbook
+
         wb = Workbook()
         ws = wb.active
         for row in data:
@@ -123,173 +178,233 @@ class VCenterManagerApp:
 
     def _get_iscsi_template(self):
         return [
-            ['VC', 'ESXI主机', 'iSCSI动态发现IP'],
-            ['192.168.1.250', 'esxi-01', '192.168.100.10,192.168.100.11']
+            ["VC", "ESXi主机", "iSCSI动态发现IP"],
+            ["192.168.1.250", "esxi-01", "192.168.100.10,192.168.100.11"],
         ]
 
     def _get_vmotion_template(self):
         return [
-            ['VC', '虚拟机名称', '迁移后主机', '迁移后存储'],
-            ['192.168.1.250', 'vm-test-01', 'esxi-02', 'datastore1']
+            ["VC", "虚拟机名称", "迁移后主机", "迁移后存储"],
+            ["192.168.1.250", "vm-test-01", "esxi-02", "datastore1"],
         ]
 
     def _get_remark_template(self):
         return [
-            ['VC', 'UUID', '备注'],
-            ['192.168.1.250', '501ff123-4567-8901-abcd-ef0123456789', '测试虚拟机']
+            ["VC", "UUID", "备注"],
+            ["192.168.1.250", "501ff123-4567-8901-abcd-ef0123456789", "测试虚拟机"],
         ]
 
     def _get_rename_template(self):
         return [
-            ['VC', 'UUID', '新名称'],
-            ['192.168.1.250', '501ff123-4567-8901-abcd-ef0123456789', 'vm-new-01']
+            ["VC", "UUID", "新名称"],
+            ["192.168.1.250", "501ff123-4567-8901-abcd-ef0123456789", "vm-new-01"],
         ]
 
     def _get_clone_template(self):
         return [
-            ['VC', '主机名称', '存储名称', '文件夹名称', '模板名称', '自定义规范名称',
-             '虚拟机名称', '主机名', 'CPU数量', '内存大小', '端口组', 'IP地址',
-             '子网掩码', '网关', 'DNS1', 'DNS2', '硬盘', '备注'],
-            ['192.168.1.250', 'esxi-01', 'datastore1', 'folder1', 'win2019-template', '',
-             'vm-new-01', 'vmnew01', '2', '4', 'VLAN100', '192.168.1.100',
-             '255.255.255.0', '192.168.1.1', '8.8.8.8', '114.114.114.114', '100', '生产环境']
+            [
+                "VC",
+                "主机名称",
+                "存储名称",
+                "文件夹名称",
+                "模板名称",
+                "自定义规范名称",
+                "虚拟机名称",
+                "主机名",
+                "CPU数量",
+                "内存大小",
+                "端口组",
+                "IP地址",
+                "子网掩码",
+                "网关",
+                "DNS1",
+                "DNS2",
+                "硬盘",
+                "备注",
+            ],
+            [
+                "192.168.1.250",
+                "esxi-01",
+                "datastore1",
+                "folder1",
+                "win2019-template",
+                "",
+                "vm-new-01",
+                "vmnew01",
+                "2",
+                "4",
+                "VLAN100",
+                "192.168.1.100",
+                "255.255.255.0",
+                "192.168.1.1",
+                "8.8.8.8",
+                "114.114.114.114",
+                "100",
+                "生产环境",
+            ],
+        ]
+
+    def _get_vm_resize_template(self):
+        return [
+            ["VC", "虚拟机名称", "CPU", "内存"],
+            ["192.168.1.250", "vm-test-01", "4", "8"],
+            ["192.168.1.250", "vm-test-02", "", "16"],
+            ["192.168.1.250", "vm-test-03", "8", ""],
         ]
 
     def _show_about(self):
-        messagebox.showinfo("关于", "vCenter管理巡检工具\n版本: 2.0\n用于批量管理vCenter和ESXi主机")
+        messagebox.showinfo(
+            "关于",
+            "VCenter管理巡检工具\n版本: 2.0\n用于批量管理 vCenter、ESXi 主机和虚拟机。",
+        )
 
     def _show_help(self):
-        help_text = """【使用说明】
+        help_text = """VCenter管理巡检工具 - 使用说明书 (v2.0)
 
-更多工具请关注CSDN-小周学学学
+═══════════════════════════════════════════════════════════════════
+一、软件概述
+═══════════════════════════════════════════════════════════════════
+VCenter管理巡检工具是一款用于批量管理VMware vCenter、ESXi主机和虚拟机的自动化工具。
+支持多vCenter统一管理，提供巡检、批量操作、克隆、证书管理、定时任务等功能。
 
-一、vCenter管理
-- 添加/删除/测试vCenter连接信息
-- 凭据会被保存，关闭程序后再次打开仍然有效
-- 支持SSL证书过期时间显示
+═══════════════════════════════════════════════════════════════════
+二、功能模块总览
+═══════════════════════════════════════════════════════════════════
+【vCenter管理】添加、编辑、删除vCenter连接
+【ESXi主机巡检】采集ESXi主机硬件、性能、证书信息
+【虚拟机巡检】采集虚拟机配置、状态、网络信息
+【批量操作】10种批量操作类型（iSCSI、迁移、重命名等）
+【虚拟机克隆】从模板批量克隆虚拟机
+【VCenter证书查询及续订】VMCA证书查询与续订
+【定时巡检】自动定时执行巡检任务
+【定时开关机】定时开关虚拟机
+【信息查询】智能查询主机和虚拟机信息
 
-二、ESXi主机巡检
-- 选择vCenter后点击"开始巡检"采集数据
-- "一键巡检"可同时巡检所有已添加的vCenter（并发5个）
-- 支持搜索主机名、筛选（vCenter/集群/状态/版本/厂商）
-- 支持列头筛选和高级筛选
-- 可导出当前vCenter或所有vCenter的数据
-- "导出iSCSI信息"可导出所有ESXi主机的iSCSI配置
+═══════════════════════════════════════════════════════════════════
+三、vCenter管理
+═══════════════════════════════════════════════════════════════════
+字段说明:
+  • IP地址 [必填]: vCenter服务器IP
+  • 区域 [选填]: 自定义区域标识
+  • 用户名 [必填]: vCenter登录用户名
+  • 密码 [必填]: vCenter登录密码
+  • root密码 [选填]: ESXi root密码（用于证书续订）
+  • 备注 [选填]: 备注信息
 
-三、虚拟机巡检
-- 选择vCenter后点击"开始巡检"采集数据
-- "一键巡检"可同时巡检所有已添加的vCenter（并发5个）
-- 支持搜索虚拟机名/IP、筛选（vCenter/集群/存储/电源状态/Tools状态）
-- 支持列头筛选和高级筛选
-- 支持横向滚动查看更多列
+操作: 添加 → 编辑 → 删除 → 测试连接
 
-四、批量操作
-【iSCSI挂载】
-- VC: vCenter IP地址（必填）
-- ESXi主机: 目标ESXi主机名（必填）
-- iSCSI目标IP: 目标iSCSI服务器IP，多个用逗号分隔（必填）
-- 效果: 为指定ESXi主机添加iSCSI存储
+═══════════════════════════════════════════════════════════════════
+四、ESXi主机巡检 - 巡检内容
+═══════════════════════════════════════════════════════════════════
+采集字段:
+  • vCenter, 主机名, 集群, 状态
+  • ESXi版本, 厂商, 型号, 序列号
+  • CPU型号, CPU主频, CPU数量, CPU核心数
+  • 内存(GB), 运行天数
+  • CPU使用率, 内存使用率
+  • 证书是否即将过期, 证书过期时间
+  • VMK适配器
 
-【虚拟机迁移】
-- VC: vCenter IP地址（必填）
-- 虚拟机名称: 要迁移的VM名称（必填）
-- 迁移后主机: 目标ESXi主机名（可选）
-- 迁移后存储: 目标存储名称（可选）
-- 效果:
-  * 只填主机 = 只迁移计算资源
-  * 只填存储 = 只迁移存储资源
-  * 两者都填 = 同时迁移计算和存储
+工具栏: 开始巡检 | 一键巡检 | 导出Excel | iSCSI | 端口组 | 本地硬盘 | 存储巡检 | 网卡巡检
 
-【修改备注】
-- VC: vCenter IP地址（必填）
-- 主机名: 虚拟机名称（必填）
-- 备注: 要设置的备注内容（必填）
-- 效果: 修改虚拟机的备注/注释
+═══════════════════════════════════════════════════════════════════
+五、虚拟机巡检 - 巡检内容
+═══════════════════════════════════════════════════════════════════
+采集字段:
+  • vCenter, 虚拟机名, 集群, 主机, 存储
+  • 是否受NSX纳管, 备注
+  • 电源状态, IP地址, 内存(GB), CPU数量
+  • UUID, 系统版本, 客户机操作系统
+  • Tools状态, 运行天数
+  • 磁盘, 端口组, 已用空间(GB)
 
-【重命名】
-- VC: vCenter IP地址（必填）
-- 主机名: 原虚拟机名称（必填）
-- 新名称: 新的虚拟机名称（必填）
-- 效果: 重命名虚拟机
+═══════════════════════════════════════════════════════════════════
+六、右键菜单功能
+═══════════════════════════════════════════════════════════════════
+【ESXi主机右键菜单】
+  • iSCSI挂载 - 批量挂载iSCSI存储
+  • ESXi证书续订 - 批量续订ESXi证书
+  • 开启SSH - 批量开启SSH服务
+  • 配置NTP - 批量配置NTP服务器
+  • 修改root密码 - 批量修改root密码
 
-【分布式交换机/端口组】
-Excel文件包含两个Sheet:
-- 分布式交换机（Sheet1）:
-  * VC: vCenter IP地址（必填）
-  * 数据中心: 数据中心名称（必填）
-  * 分布式交换机名称: 交换机名称（必填）
-  * 默认4个上行链路，不创建默认端口组
-  * 已存在的交换机不会重复创建，会跳过
-- 分布式端口组（Sheet2）:
-  * VC: vCenter IP地址（必填）
-  * 分布式交换机名称: 目标交换机名称（必填）
-  * 端口组名称: 端口组名称（必填）
-  * 端口组VLAN: VLAN ID（必填，填写0表示不标记VLAN）
-  * 已存在的端口组不会重复创建，会跳过
-- 执行顺序:
-  * 交换机Sheet为空 = 只创建端口组
-  * 端口组Sheet为空 = 只创建交换机
-  * 两者都有 = 先创建交换机再创建端口组
+【虚拟机右键菜单】
+  • 虚拟机迁移 - 迁移虚拟机到目标主机/存储
+  • 添加网络适配器 - 添加虚拟网卡
+  • 修改备注 - 修改虚拟机备注
+  • 批量重命名 - 批量修改虚拟机名称
+  • 添加硬盘 - 添加虚拟硬盘
+  • CPU内存扩容 - 调整CPU/内存配置
 
-【模板下载】: 每个批量操作都有对应模板，点击下载后按格式填写
+═══════════════════════════════════════════════════════════════════
+七、批量操作 - 模板字段说明
+═══════════════════════════════════════════════════════════════════
+【iSCSI模板】VC[必填] | ESXi主机[必填] | iSCSI动态发现IP[必填]
 
-五、批量克隆（最常用功能，详细说明）
+【虚拟机迁移模板】VC[必填] | 虚拟机名称[必填] | 迁移后主机[至少填一个] | 迁移后存储[至少填一个]
 
-【Excel模板列说明】（共18列）:
-1. VC: vCenter IP地址（必填）
-2. 主机名称: 目标ESXi主机名（必填，VM要部署到的目标主机）
-3. 存储名称: 目标数据存储名称（必填，VM的虚拟磁盘存放位置）
-4. 文件夹名称: VM所在文件夹（可选，不填则放到数据中心根目录；填了则自动创建不存在的文件夹再放入）
-5. 模板名称: 克隆源模板名称（必填，存在于vCenter中的VM模板）
-6. 自定义规范名称: Windows域或Linux自定义规范（可选，用于OS定制）
-7. 虚拟机名称: 新建VM的名称（必填）
-8. 主机名: 虚拟机操作系统 hostname（可选，不填则不设置hostname）
-9. CPU数量: CPU核心数（可选，不填则保留模板原CPU配置）
-10. 内存大小: 内存GB数（可选，不填则保留模板原内存配置）
-11. 端口组: 网络端口组名称（可选，不填则保留原有网络）
-12. IP地址: 虚拟机IP（可选，配合自定义规范实现IP配置）
-13. 子网掩码: 子网掩码（可选，默认255.255.255.0）
-14. 网关: 网关地址（可选）
-15. DNS1: 主DNS服务器（可选，配合自定义规范使用）
-16. DNS2: 备用DNS服务器（可选，配合自定义规范使用）
-17. 硬盘: 硬盘大小GB（可选，多个硬盘用换行分隔，如"100\n200"）
-18. 备注: VM备注/描述（可选）
+【修改备注模板】VC[必填] | UUID[必填] | 备注[必填]
 
-【使用场景和示例】:
+【批量重命名模板】VC[必填] | UUID[必填] | 新名称[必填]
 
-场景1: 快速克隆（最简单）
-- 只填写必填项: VC、主机名称、存储名称、模板名称、虚拟机名称
-- 效果: 从模板克隆VM到目标主机和存储，其他保持默认
+【CPU内存扩容模板】VC[必填] | 虚拟机名称[必填] | CPU[至少填一个] | 内存[至少填一个]
 
-场景2: 完整配置克隆（最常用）
-- 填写所有项包括IP地址、DNS等
-- 效果: 完整克隆并通过自定义规范配置OS（IP、hostname、DNS等）
-- 注意: 需要在vCenter中预先创建好自定义规范
+【虚拟机克隆模板】
+  必填: VC, 主机名称, 存储名称, 模板名称, 虚拟机名称, 主机名
+  选填: 文件夹名称, 自定义规范名称, CPU数量, 内存大小, 端口组,
+        IP地址, 子网掩码, 网关, DNS1, DNS2, 硬盘, 备注
 
-场景3: 自定义硬件配置
-- 填写CPU数量、内存大小、硬盘
-- 效果: 克隆时调整VM硬件规格
+═══════════════════════════════════════════════════════════════════
+八、VCenter证书查询及续订
+═══════════════════════════════════════════════════════════════════
+功能:
+  • 查询VMCA证书信息（需配置root密码）
+  • 执行VMCA证书续订（管理面可能短时中断）
+  • 过期证书会用红色标记
 
-【重要提示】:
-- 模板必须是已存在于vCenter中的VM模板
-- 主机名称和存储必须在指定的vCenter中存在
-- 如果填写IP/DNS等网络配置，必须同时填写自定义规范名称
-- 克隆完成后会自动开机
-- 支持5个并发克隆任务，效率更高
+操作: 选择vCenter → 查询证书 → 一键续订(VMCA)
 
-六、其他
-- 所有vCenter操作都支持并发执行，提高效率
-- 状态栏显示当前操作进度
-- 按ESC键或关闭按钮安全退出"""
+═══════════════════════════════════════════════════════════════════
+九、定时巡检
+═══════════════════════════════════════════════════════════════════
+任务类型: ESXi巡检 | 虚拟机巡检 | 存储巡检 | 存储巡检-跳过不可访问存储
+调度方式: 每天 | 每周 | 仅一次
+执行时间: HH:MM格式
+
+右键菜单: 立即执行 | 编辑 | 删除
+
+═══════════════════════════════════════════════════════════════════
+十、定时开关机
+═══════════════════════════════════════════════════════════════════
+动作: 开机 | 关机
+目标输入格式: UUID / 虚拟机名称 / IP地址（每行一个，支持逗号分隔）
+
+═══════════════════════════════════════════════════════════════════
+十一、信息查询
+═══════════════════════════════════════════════════════════════════
+支持查询:
+  • 虚拟机IP地址
+  • 虚拟机名称
+  • ESXi主机名
+  • ESXi IP（来自VMK适配器）
+
+操作: 输入查询条件 → 点击查询/回车 → 查看结果
+
+═══════════════════════════════════════════════════════════════════
+十二、打包为EXE
+═══════════════════════════════════════════════════════════════════
+执行命令: pyinstaller setup.spec
+
+═══════════════════════════════════════════════════════════════════"""
 
         help_win = tk.Toplevel(self.root)
-        help_win.title("使用说明")
-        help_win.geometry("700x850")
+        help_win.title("VCenter管理巡检工具 - 使用说明书")
+        help_win.geometry("850x750")
 
-        text = tk.Text(help_win, wrap=tk.WORD, padx=10, pady=10, font=FONTS['normal'])
+        text = tk.Text(help_win, wrap=tk.WORD, padx=15, pady=15, font=("Microsoft YaHei", 10))
         text.pack(fill=tk.BOTH, expand=True)
-        text.insert('1.0', help_text)
-        text.config(state='disabled')
+        text.insert("1.0", help_text)
+        text.config(state="disabled")
 
         scrollbar = ttk.Scrollbar(help_win, command=text.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -297,6 +412,14 @@ Excel文件包含两个Sheet:
 
     def _on_closing(self):
         if messagebox.askyesno("退出", "确定要退出吗？"):
+            for scheduler_name in ("inspection_scheduler", "power_scheduler"):
+                scheduler = getattr(self, scheduler_name, None)
+                if scheduler and hasattr(scheduler, "stop"):
+                    try:
+                        scheduler.stop()
+                    except Exception:
+                        pass
+            self.root.quit()
             self.root.destroy()
 
     def update_status(self, message):

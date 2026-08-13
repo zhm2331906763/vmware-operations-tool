@@ -89,3 +89,70 @@ class VMRemarkUpdater:
             })
         
         return results
+
+
+class VMNetworkAdapterManager:
+    def __init__(self, connector):
+        self.connector = connector
+
+    def add_network_adapter(self, vm_name, portgroup_name, adapter_type='vmxnet3'):
+        vm = self.connector.get_vm_by_name(vm_name)
+        if not vm:
+            return False, f"找不到虚拟机: {vm_name}"
+
+        portgroup_name = (portgroup_name or '').strip()
+        if not portgroup_name:
+            return False, "端口组名称不能为空"
+
+        network = self.connector.get_obj([vim.Network], portgroup_name)
+        if not network:
+            network = self.connector.get_obj([vim.OpaqueNetwork], portgroup_name)
+        if not network:
+            return False, f"找不到网络/端口组: {portgroup_name}"
+
+        try:
+            if hasattr(network, 'config') and hasattr(network.config, 'distributedVirtualSwitch'):
+                port_conn = vim.dvs.PortConnection(
+                    portgroupKey=network.key,
+                    switchUuid=network.config.distributedVirtualSwitch.uuid,
+                )
+                backing = vim.vm.device.VirtualEthernetCard.DistributedVirtualPortBackingInfo(port=port_conn)
+            elif isinstance(network, vim.OpaqueNetwork):
+                summary = getattr(network, 'summary', None)
+                backing = vim.vm.device.VirtualEthernetCard.OpaqueNetworkBackingInfo()
+                backing.opaqueNetworkId = getattr(summary, 'opaqueNetworkId', '') or ''
+                backing.opaqueNetworkType = getattr(summary, 'opaqueNetworkType', '') or ''
+            else:
+                backing = vim.vm.device.VirtualEthernetCard.NetworkBackingInfo(
+                    deviceName=network.name,
+                    network=network,
+                )
+
+            adapter_class = {
+                'e1000e': vim.vm.device.VirtualE1000e,
+                'e1000': vim.vm.device.VirtualE1000,
+                'vmxnet2': vim.vm.device.VirtualVmxnet2,
+                'vmxnet3': vim.vm.device.VirtualVmxnet3,
+            }.get((adapter_type or 'vmxnet3').lower(), vim.vm.device.VirtualVmxnet3)
+
+            nic = adapter_class()
+            nic.backing = backing
+            nic.key = -1000
+            nic.addressType = 'generated'
+            nic.connectable = vim.vm.device.VirtualDevice.ConnectInfo(
+                startConnected=True,
+                allowGuestControl=True,
+                connected=True,
+            )
+
+            vmconf = vim.vm.ConfigSpec()
+            device_spec = vim.vm.device.VirtualDeviceSpec()
+            device_spec.operation = vim.vm.device.VirtualDeviceSpec.Operation.add
+            device_spec.device = nic
+            vmconf.deviceChange = [device_spec]
+
+            task = vm.ReconfigVM_Task(spec=vmconf)
+            WaitForTask(task)
+            return True, f"已添加网络适配器: {portgroup_name}"
+        except Exception as e:
+            return False, str(e)

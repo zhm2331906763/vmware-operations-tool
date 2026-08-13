@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1930"/>
+      <stop offset="1" stop-color="#122b4b"/>
+    </linearGradient>
+    <linearGradient id="node" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#55e0dc"/>
+      <stop offset="1" stop-color="#159bb7"/>
+    </linearGradient>
+    <linearGradient id="tool" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd36b"/>
+      <stop offset="1" stop-color="#e58a25"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#020814" flood-opacity=".45"/>
+    </filter>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
+  <path d="M77 91 128 61l51 30v59l-51 30-51-30z" fill="#0b1730" stroke="#8af4ed" stroke-width="5" opacity=".96"/>
+  <path d="M77 91 128 121l51-30M128 121v59" fill="none" stroke="#8af4ed" stroke-width="5" opacity=".9"/>
+  <path d="M55 170 91 149M201 170 165 149M128 49v22" fill="none" stroke="#55d9df" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="55" cy="170" r="12" fill="url(#node)" filter="url(#shadow)"/>
+  <circle cx="201" cy="170" r="12" fill="url(#node)" filter="url(#shadow)"/>
+  <circle cx="128" cy="49" r="12" fill="url(#node)" filter="url(#shadow)"/>
+  <path d="M128 94 154 109v30l-26 15-26-15v-30z" fill="url(#node)" filter="url(#shadow)"/>
+  <path d="m166 193 24-24c4-4 10-4 14 0l7 7c4 4 4 10 0 14l-24 24-14-3-10-10z" fill="url(#tool)" filter="url(#shadow)"/>
+  <path d="m188 171 12 12" stroke="#fff1be" stroke-width="5" stroke-linecap="round"/>
+  <path d="M172 211 159 224" stroke="#f0a33b" stroke-width="13" stroke-linecap="round"/>
+  <path d="m153 226 10 10" stroke="#ffd36b" stroke-width="7" stroke-linecap="round"/>
+</svg>

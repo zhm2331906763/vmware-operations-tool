@@ -1,3 +1,4 @@
+import threading
 import tkinter as tk
 from tkinter import ttk
 from .theme import COLORS, FONTS
@@ -111,12 +112,21 @@ class ColumnFilterPanel(tk.Toplevel):
 
 
 class FilterableTable(ttk.Frame):
-    def __init__(self, parent, columns, column_widths=None, page_size=50, filter_columns=None):
+    def __init__(
+        self,
+        parent,
+        columns,
+        column_widths=None,
+        page_size=50,
+        filter_columns=None,
+        row_style_callback=None,
+    ):
         super().__init__(parent)
         self.columns = list(columns)
         self.column_widths = column_widths or {}
         self.page_size = page_size
         self.filter_columns = set(filter_columns) if filter_columns else set(columns)
+        self.row_style_callback = row_style_callback
         self.all_data = []
         self.filtered_data = []
         self.current_page = 1
@@ -192,6 +202,7 @@ class FilterableTable(ttk.Frame):
         style.configure('Treeview.Heading', font=FONTS['bold'], background=COLORS['bg_toolbar'],
                         foreground=COLORS['text_primary'], anchor='center')
         style.map('Treeview', background=[('selected', COLORS['row_selected'])])
+        self.tree.tag_configure('nsx_managed', background='#E2F0D9')
 
         page_frame = ttk.Frame(self)
         page_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -324,6 +335,12 @@ class FilterableTable(ttk.Frame):
 
         for row in page_data:
             display_row = []
+            row_tags = ()
+            if self.row_style_callback:
+                try:
+                    row_tags = self.row_style_callback(row) or ()
+                except Exception:
+                    row_tags = ()
             for i, val in enumerate(row):
                 if i < len(self.columns):
                     if val is None:
@@ -332,13 +349,33 @@ class FilterableTable(ttk.Frame):
                         display_row.append(f'{val}%')
                     else:
                         display_row.append(str(val))
-            self.tree.insert('', tk.END, values=display_row)
+            self.tree.insert('', tk.END, values=display_row, tags=row_tags)
 
         self.page_label.config(text=f"第 {self.current_page}/{self.total_pages} 页，共 {self.total_count} 条")
         self.status_label.config(text=f"显示 {len(page_data)} 条" if page_data else "无数据")
 
-    def set_data(self, data):
+    def set_data(self, data, preserve_view=False):
         self.all_data = list(data) if data else []
+
+        if preserve_view:
+            current_search = self.search_entry.get().strip()
+            current_filters = {k: set(v) for k, v in self.filters.items()}
+            current_page = self.current_page
+
+            self.filtered_data = list(self.all_data)
+            self.total_count = len(self.all_data)
+            self.total_pages = max(1, (self.total_count + self.page_size - 1) // self.page_size)
+            self.filters = current_filters
+            self._update_filter_buttons()
+            self._apply_all_filters()
+
+            if current_search:
+                self.search_entry.delete(0, tk.END)
+                self.search_entry.insert(0, current_search)
+            self.current_page = min(max(1, current_page), self.total_pages)
+            self._refresh_table()
+            return
+
         self.filtered_data = list(self.all_data)
         self.total_count = len(self.all_data)
         self.total_pages = max(1, (self.total_count + self.page_size - 1) // self.page_size)
@@ -380,13 +417,15 @@ class EnhancedButton(ttk.Button):
 
 
 class ProgressDialog(tk.Toplevel):
-    def __init__(self, parent, title="处理中"):
+    def __init__(self, parent, title="处理中", determinate=False, maximum=100):
         super().__init__(parent)
         self.title(title)
         self.geometry("400x150")
         self.transient(parent)
         self.grab_set()
         self.configure(bg=COLORS['bg_card'])
+        self._determinate = determinate
+        self._maximum = max(1, int(maximum or 100))
 
         main_frame = ttk.Frame(self, padding=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -394,23 +433,71 @@ class ProgressDialog(tk.Toplevel):
         self.title_label = ttk.Label(main_frame, text="请稍候，正在处理...", font=FONTS['title'])
         self.title_label.pack(pady=(0, 15))
 
-        self.progress = ttk.Progressbar(main_frame, mode='indeterminate', length=350)
+        mode = 'determinate' if determinate else 'indeterminate'
+        self.progress = ttk.Progressbar(main_frame, mode=mode, length=350, maximum=self._maximum)
+        if determinate:
+            self.progress['value'] = 0
         self.progress.pack(pady=10)
-        self.progress.start(10)
+        if not determinate:
+            self.progress.start(10)
 
         self.status_label = ttk.Label(main_frame, text="")
         self.status_label.pack(pady=10)
 
     def update_status(self, message):
-        self.status_label.config(text=message)
-        self.update()
+        self._run_ui(lambda: self._set_status(message))
+
+    def set_determinate(self, maximum, value=0, detail=None):
+        def _apply():
+            self._determinate = True
+            self._maximum = max(1, int(maximum or 1))
+            self.progress.stop()
+            self.progress.config(mode='determinate', maximum=self._maximum)
+            self.progress['value'] = max(0, min(int(value), self._maximum))
+            if detail is not None:
+                self._set_status(detail)
+        self._run_ui(_apply)
+
+    def update_progress(self, current, total=None, message=None):
+        def _apply():
+            if total is not None:
+                self._maximum = max(1, int(total or 1))
+                self.progress.config(maximum=self._maximum)
+            if self.progress.cget('mode') != 'determinate':
+                self.progress.stop()
+                self.progress.config(mode='determinate')
+            self.progress['value'] = max(0, min(int(current), int(self._maximum)))
+            if message is not None:
+                self._set_status(message)
+        self._run_ui(_apply)
 
     def update_detail(self, message):
-        pass
+        self._run_ui(lambda: self._set_status(message))
+
+    def _set_status(self, message):
+        self.status_label.config(text=message)
+        self.update_idletasks()
+
+    def _run_ui(self, callback):
+        if threading.current_thread() is threading.main_thread():
+            callback()
+            return
+        try:
+            self.after(0, callback)
+        except Exception:
+            pass
 
     def close(self):
-        self.progress.stop()
-        self.destroy()
+        def _close():
+            try:
+                self.progress.stop()
+            except Exception:
+                pass
+            try:
+                self.destroy()
+            except Exception:
+                pass
+        self._run_ui(_close)
 
 
 class EnhancedStatusBar(ttk.Frame):

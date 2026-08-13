@@ -10,6 +10,7 @@ from src.core.concurrent_config import ConcurrentConfig
 
 class HostCollector:
     CERT_TIMEOUT = 2
+    CERT_EXPIRY_WARNING_DAYS = 30
 
     def __init__(self, connector):
         self.connector = connector
@@ -168,6 +169,7 @@ class HostCollector:
                 host_ip = host_name
 
             cert_expiry = cert_result.get(host_ip, None)
+            cert_expiring_soon = '是' if self._is_cert_expiring_soon(cert_expiry) else '否'
 
             vmk_adapters = self._get_vmk_adapters(props.get('config.network'), network_cache)
 
@@ -188,6 +190,7 @@ class HostCollector:
                 'uptime_days': uptime_days,
                 'cpu_usage': cpu_usage,
                 'memory_usage': memory_usage,
+                'cert_expiring_soon': cert_expiring_soon,
                 'vmk_adapters': vmk_adapters,
                 'cert_expiry': cert_expiry,
                 'host_ip': host_ip
@@ -195,6 +198,23 @@ class HostCollector:
         except Exception as e:
             print(f"解析主机失败: {e}")
             return None
+
+    def _is_cert_expiring_soon(self, cert_expiry):
+        try:
+            if not cert_expiry:
+                return False
+            if isinstance(cert_expiry, datetime.datetime):
+                expiry_date = cert_expiry.date()
+            elif isinstance(cert_expiry, datetime.date):
+                expiry_date = cert_expiry
+            else:
+                expiry_date = datetime.datetime.strptime(str(cert_expiry).strip().split(' ')[0], '%Y-%m-%d').date()
+
+            today = datetime.date.today()
+            delta_days = (expiry_date - today).days
+            return delta_days <= self.CERT_EXPIRY_WARNING_DAYS
+        except Exception:
+            return False
 
     def _get_serial_number(self, system_info, bios_info):
         invalid_serials = {"", " ", "default string", "unknown", "n/a", "na", "无", "none", "null",
@@ -319,19 +339,95 @@ class HostCollector:
                     final_vendor = raw_vendor if raw_vendor and raw_vendor.lower() not in ['ata', 'unknown', '', 'lsi', 'perc'] else ''
 
                 capacity = 0.0
+                used_capacity = 0.0
                 if hasattr(lun, 'capacity') and lun.capacity:
                     capacity = round(lun.capacity.block * lun.capacity.blockSize / (1024 ** 3), 2)
+
+                disk_name = f"磁盘 {disk_idx}" if not final_model else (f"{final_vendor} {final_model}" if final_vendor else final_model)
 
                 disk_details.append({
                     'vc_ip': vc_ip,
                     'host_name': host_name,
                     'disk_index': disk_idx,
+                    'disk_name': disk_name,
                     'disk_vendor': final_vendor,
                     'disk_model': final_model,
-                    'disk_capacity': capacity
+                    'disk_capacity': capacity,
+                    'disk_used': used_capacity,
+                    'disk_usage': 0.0
                 })
                 disk_idx += 1
 
             return disk_details
         except:
             return []
+
+    def collect_all_local_disks(self, progress_callback=None):
+        if not self.connector.is_connected():
+            return []
+
+        print("开始采集本地硬盘数据...")
+
+        cluster_map = self.connector.build_cluster_host_map()
+        datacenter_map = self.connector.build_datacenter_map()
+
+        result = self.connector.get_all_hosts()
+
+        host_info_list = []
+        for obj_content in result:
+            props = {p.name: p.val for p in obj_content.propSet}
+            host_mor = obj_content.obj
+            host_name = props.get('name', '')
+            host_ip = self._get_host_ip(props) or host_name
+            host_info_list.append({
+                'mor': host_mor,
+                'props': props,
+                'name': host_name,
+                'ip': host_ip
+            })
+
+        host_count = len(host_info_list)
+        collect_workers = ConcurrentConfig.get_optimal_workers('host_collect_parse', host_count)
+
+        all_disks = []
+
+        def collect_host_disks(host_info):
+            mor = host_info['mor']
+            props = host_info['props']
+            host_name = host_info['name']
+            vc_ip = self.connector.ip
+
+            cluster_name = cluster_map.get(getattr(mor, '_moId', ''), '')
+
+            datacenter_name = ''
+            for dc, clusters in datacenter_map.items():
+                if cluster_name in clusters:
+                    datacenter_name = dc
+                    break
+
+            storage_device = props.get('config.storageDevice')
+            disks = self.get_host_disks(storage_device, host_name, vc_ip)
+
+            for disk in disks:
+                disk['datacenter'] = datacenter_name
+                disk['cluster'] = cluster_name
+
+            return disks
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=collect_workers) as executor:
+            futures = {
+                executor.submit(collect_host_disks, hi): hi['name']
+                for hi in host_info_list
+            }
+
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    disks = future.result()
+                    if disks:
+                        all_disks.extend(disks)
+                    if progress_callback:
+                        progress_callback(1)
+                except Exception as e:
+                    print(f"采集主机硬盘失败: {e}")
+
+        return all_disks

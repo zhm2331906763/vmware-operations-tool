@@ -3,6 +3,7 @@ import socket
 import datetime
 import concurrent.futures
 from pyVim.connect import SmartConnect, Disconnect
+from pyVim.task import WaitForTask
 from pyVmomi import vim
 from pyVmomi import vmodl
 from cryptography import x509
@@ -82,9 +83,10 @@ class VCenterConnector:
         
         properties = [
             'name', 'runtime.host', 'runtime.powerState', 'runtime.bootTime',
-            'guest.ipAddress', 'guest.net', 'guest.toolsStatus',
+            'guest.ipAddress', 'guest.net', 'guest.toolsStatus', 'guest.guestFullName',
             'config.hardware.memoryMB', 'config.hardware.numCPU', 'config.hardware.device',
-            'config.instanceUuid', 'config.annotation', 'config.modified',
+            'config.instanceUuid', 'config.annotation', 'config.modified', 'config.guestFullName',
+            'config.cpuHotAddEnabled', 'config.memoryHotAddEnabled',
             'datastore', 'summary.storage.committed', 'parent'
         ]
         
@@ -131,6 +133,33 @@ class VCenterConnector:
                     for host in cluster.host:
                         cluster_map[host._moId] = cluster_name
             return cluster_map
+        except:
+            return {}
+    
+    def build_datacenter_map(self):
+        datacenter_map = {}
+        try:
+            dc_container = self.content.viewManager.CreateContainerView(
+                self.content.rootFolder, [vim.Datacenter], True
+            )
+            all_dcs = dc_container.view
+            dc_container.Destroy()
+            
+            for dc in all_dcs:
+                dc_name = dc.name
+                if hasattr(dc, 'hostFolder') and dc.hostFolder:
+                    try:
+                        clusters = dc.hostFolder.childEntity
+                        for cluster in clusters:
+                            if hasattr(cluster, 'name'):
+                                if dc_name not in datacenter_map:
+                                    datacenter_map[dc_name] = set()
+                                datacenter_map[dc_name].add(cluster.name)
+                    except:
+                        pass
+            for k, v in datacenter_map.items():
+                datacenter_map[k] = list(v)
+            return datacenter_map
         except:
             return {}
     
@@ -212,7 +241,12 @@ class VCenterConnector:
     def get_obj(self, vimtype, name=None):
         """获取对象函数"""
         container = self.content.viewManager.CreateContainerView(self.content.rootFolder, vimtype, True)
-        return next((item for item in container.view if item.name == name), None) if name else container.view
+        try:
+            if name:
+                return next((item for item in container.view if item.name == name), None)
+            return list(container.view)
+        finally:
+            container.Destroy()
     
     def get_all_datastores(self):
         if not self.is_connected():
@@ -266,6 +300,46 @@ class VCenterConnector:
     def find_vm_by_uuid(self, uuid):
         return self.get_vm_by_uuid(uuid, instance_uuid=True)
 
+    def get_vm_by_ip(self, ip_address):
+        if not self.is_connected():
+            return None
+        container = self.content.viewManager.CreateContainerView(
+            self.content.rootFolder, [vim.VirtualMachine], True
+        )
+        try:
+            for vm in container.view:
+                guest = getattr(vm, "guest", None)
+                summary_guest = getattr(getattr(vm, "summary", None), "guest", None)
+                if ip_address in {getattr(guest, "ipAddress", ""), getattr(summary_guest, "ipAddress", "")}:
+                    return vm
+            return None
+        finally:
+            container.Destroy()
+
+    def power_on_vm(self, vm_obj):
+        if not vm_obj:
+            return False, "未找到虚拟机"
+        try:
+            if getattr(vm_obj.runtime, "powerState", None) == vim.VirtualMachinePowerState.poweredOn:
+                return True, "虚拟机已开机"
+            task = vm_obj.PowerOnVM_Task()
+            WaitForTask(task)
+            return True, "虚拟机开机成功"
+        except Exception as e:
+            return False, str(e)
+
+    def power_off_vm(self, vm_obj):
+        if not vm_obj:
+            return False, "未找到虚拟机"
+        try:
+            if getattr(vm_obj.runtime, "powerState", None) == vim.VirtualMachinePowerState.poweredOff:
+                return True, "虚拟机已关机"
+            task = vm_obj.PowerOffVM_Task()
+            WaitForTask(task)
+            return True, "虚拟机关机成功"
+        except Exception as e:
+            return False, str(e)
+
     def update_vm_annotation(self, vm_obj, annotation):
         from pyVmomi import vim
         from pyVim.task import WaitForTask
@@ -289,3 +363,15 @@ class VCenterConnector:
             return True, f"重命名为 '{new_name}' 成功"
         except Exception as e:
             return False, str(e)
+
+    def _retrieve_properties_all(self, vim_type, properties):
+        if not self.is_connected():
+            return []
+        container = self.content.viewManager.CreateContainerView(
+            self.content.rootFolder, [vim_type], True
+        )
+        filter_spec = self._create_property_filter_spec(container, vim_type, properties)
+        pc = self.content.propertyCollector
+        result = pc.RetrieveProperties(specSet=[filter_spec])
+        container.Destroy()
+        return result

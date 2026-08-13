@@ -10,7 +10,6 @@ from src.core.vm_cloner import VMCloner
 from src.core.concurrent_config import ConcurrentConfig
 from src.ui.theme import COLORS, FONTS
 from src.ui.enhanced_widgets import EnhancedButton, ProgressDialog
-from pyVim.task import WaitForTask
 from openpyxl import load_workbook
 
 
@@ -90,6 +89,44 @@ class ClonePage:
         self.progress_text.see(tk.END)
         self.parent.update()
 
+    def _power_on_with_retry(self, connector, vm_name, retries=3, base_delay=2):
+        last_error = "开机失败"
+        for attempt in range(1, retries + 1):
+            try:
+                vm = connector.get_vm_by_name(vm_name)
+                if not vm:
+                    last_error = "未找到已克隆的虚拟机"
+                else:
+                    success, msg = connector.power_on_vm(vm)
+                    if success:
+                        return True, msg
+                    last_error = msg or last_error
+
+                if attempt < retries:
+                    time.sleep(base_delay * attempt)
+            except Exception as e:
+                last_error = str(e)
+                if attempt < retries:
+                    time.sleep(base_delay * attempt)
+        return False, last_error
+
+    def _clone_with_retry(self, cloner, config, retries=2, base_delay=3):
+        last_error = "克隆失败"
+        transient_markers = ("HostConnectFault", "Cannot connect to host", "connect to host")
+
+        for attempt in range(1, retries + 1):
+            success, msg = cloner.clone_vm(config)
+            if success:
+                return True, msg
+
+            last_error = msg or last_error
+            if attempt < retries and any(marker.lower() in str(last_error).lower() for marker in transient_markers):
+                time.sleep(base_delay * attempt)
+                continue
+            break
+
+        return False, last_error
+
     def _execute_clone(self):
         file_path = self.file_path_var.get()
         if not file_path:
@@ -132,32 +169,31 @@ class ClonePage:
                 self.parent.after(0, lambda: self._log(f"🚀 开始处理 vCenter: {vc_ip}", 'header'))
                 self.parent.after(0, lambda: self._log(f"{'='*50}", 'header'))
 
-                connector = VCenterConnector(vc_ip, vc_config[2], vc_config[3])
-                success_conn, msg = connector.connect()
-                if not success_conn:
-                    self.parent.after(0, lambda: self._log(f"[❌ 错误] 连接VC失败: {msg}", 'error'))
-                    return 0, len(config_list)
-
-                cloner = VMCloner(connector)
                 local_success = 0
                 local_failed = 0
 
                 def clone_single(config):
                     self.parent.after(0, lambda: self._log(f"[{config['vm_name']}] ⏳ 正在克隆...", 'info'))
+                    task_connector = VCenterConnector(vc_ip, vc_config[2], vc_config[3])
+                    try:
+                        success_conn, msg = task_connector.connect()
+                        if not success_conn:
+                            return config['vm_name'], False, f"连接VC失败: {msg}"
 
-                    success_clone, msg_clone = cloner.clone_vm(config)
+                        cloner = VMCloner(task_connector)
+                        success_clone, msg_clone = self._clone_with_retry(cloner, config)
 
-                    if success_clone:
-                        vm = connector.get_vm_by_name(config['vm_name'])
-                        if vm:
-                            try:
-                                task = vm.PowerOnVM_Task()
-                                WaitForTask(task)
+                        if success_clone:
+                            time.sleep(2)
+                            success_power_on, power_on_msg = self._power_on_with_retry(task_connector, config['vm_name'], retries=4, base_delay=3)
+                            if success_power_on:
                                 msg_clone += " ✅ (已自动开机)"
-                            except Exception as e:
-                                msg_clone += f" ⚠️ (开机失败: {e})"
+                            else:
+                                msg_clone += f" ⚠️ (开机失败: {power_on_msg})"
 
-                    return config['vm_name'], success_clone, msg_clone
+                        return config['vm_name'], success_clone, msg_clone
+                    finally:
+                        task_connector.disconnect()
 
                 max_workers = ConcurrentConfig.get_optimal_workers('clone_vm')
                 max_workers = min(max_workers, len(config_list))
@@ -165,15 +201,19 @@ class ClonePage:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = [executor.submit(clone_single, config) for config in config_list]
                     for future in concurrent.futures.as_completed(futures):
-                        vm_name, ok, msg = future.result()
+                        try:
+                            vm_name, ok, msg = future.result()
+                        except Exception as e:
+                            vm_name = "未知虚拟机"
+                            ok = False
+                            msg = str(e)
                         if ok:
-                            self.parent.after(0, lambda: self._log(f"  ✅ {vm_name}: {msg}", 'success'))
+                            self.parent.after(0, lambda vm_name=vm_name, msg=msg: self._log(f"  ✅ {vm_name}: {msg}", 'success'))
                             local_success += 1
                         else:
-                            self.parent.after(0, lambda: self._log(f"  ❌ {vm_name}: {msg}", 'error'))
+                            self.parent.after(0, lambda vm_name=vm_name, msg=msg: self._log(f"  ❌ {vm_name}: {msg}", 'error'))
                             local_failed += 1
 
-                connector.disconnect()
                 self.parent.after(0, lambda: self._log(f"vCenter {vc_ip} 处理完成\n", 'header'))
                 return local_success, local_failed
 

@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import sqlite3
 import threading
@@ -8,6 +8,7 @@ from datetime import datetime
 class Database:
     _instance = None
     _lock = threading.Lock()
+    ALLOWED_HISTORY_TABLES = {'host_inspect', 'local_disk_inspect', 'vm_inspect', 'host_disk'}
 
     def __new__(cls):
         if cls._instance is None:
@@ -31,6 +32,7 @@ class Database:
 
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_tables()
+        self._init_scheduled_tasks_table()
 
     def get_connection(self):
         return sqlite3.connect(self.db_path)
@@ -45,11 +47,22 @@ class Database:
                 ip TEXT NOT NULL UNIQUE,
                 user TEXT NOT NULL,
                 password TEXT NOT NULL,
+                root_password TEXT DEFAULT '',
+                region TEXT DEFAULT '',
                 remark TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        try:
+            cursor.execute("ALTER TABLE vcenter_config ADD COLUMN root_password TEXT DEFAULT ''")
+        except:
+            pass
+        try:
+            cursor.execute("ALTER TABLE vcenter_config ADD COLUMN region TEXT DEFAULT ''")
+        except:
+            pass
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS host_inspect (
@@ -70,11 +83,16 @@ class Database:
                 uptime_days REAL,
                 cpu_usage REAL,
                 memory_usage REAL,
+                cert_expiring_soon TEXT DEFAULT '否',
                 vmk_adapters TEXT,
                 cert_expiry TEXT,
                 inspect_time TEXT DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        try:
+            cursor.execute("ALTER TABLE host_inspect ADD COLUMN cert_expiring_soon TEXT DEFAULT '否'")
+        except:
+            pass
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS host_disk (
@@ -85,6 +103,22 @@ class Database:
                 disk_vendor TEXT,
                 disk_model TEXT,
                 disk_capacity REAL,
+                inspect_time TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS local_disk_inspect (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vc_ip TEXT NOT NULL,
+                datacenter TEXT,
+                cluster TEXT,
+                host_name TEXT NOT NULL,
+                disk_name TEXT,
+                datastore TEXT,
+                total_gb REAL,
+                used_gb REAL,
+                usage_percent TEXT,
                 inspect_time TEXT DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -102,9 +136,15 @@ class Database:
                 cpu_count INTEGER,
                 uuid TEXT,
                 annotation TEXT,
+                system_version TEXT,
+                guest_os TEXT,
+                cpu_hot_add_enabled TEXT DEFAULT '否',
+                memory_hot_add_enabled TEXT DEFAULT '否',
                 tools_status TEXT,
                 uptime_days REAL,
                 datastore TEXT,
+                vm_portgroups TEXT,
+                nsx_managed TEXT DEFAULT '否',
                 disks TEXT,
                 used_space_gb REAL,
                 folder TEXT,
@@ -116,23 +156,54 @@ class Database:
             cursor.execute('ALTER TABLE vm_inspect ADD COLUMN folder TEXT')
         except:
             pass
+        try:
+            cursor.execute('ALTER TABLE vm_inspect ADD COLUMN system_version TEXT')
+        except:
+            pass
+        try:
+            cursor.execute('ALTER TABLE vm_inspect ADD COLUMN guest_os TEXT')
+        except:
+            pass
+        try:
+            cursor.execute("ALTER TABLE vm_inspect ADD COLUMN cpu_hot_add_enabled TEXT DEFAULT '否'")
+        except:
+            pass
+        try:
+            cursor.execute("ALTER TABLE vm_inspect ADD COLUMN memory_hot_add_enabled TEXT DEFAULT '否'")
+        except:
+            pass
+        try:
+            cursor.execute('ALTER TABLE vm_inspect ADD COLUMN vm_portgroups TEXT')
+        except:
+            pass
+        try:
+            cursor.execute("ALTER TABLE vm_inspect ADD COLUMN nsx_managed TEXT DEFAULT '否'")
+        except:
+            pass
+
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_host_inspect_vc_host ON host_inspect(vc_ip, host_name)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_vm_inspect_vc_vm ON vm_inspect(vc_ip, vm_name)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_vm_inspect_uuid ON vm_inspect(uuid)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_local_disk_vc_host ON local_disk_inspect(vc_ip, host_name)')
 
         conn.commit()
         conn.close()
 
-    def add_vcenter(self, ip, user, password, remark=''):
+    def add_vcenter(self, ip, user, password, remark='', root_password='', region=''):
         with self._lock:
             conn = self.get_connection()
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    'INSERT OR REPLACE INTO vcenter_config (ip, user, password, remark, updated_at) VALUES (?, ?, ?, ?, ?)',
-                    (ip, user, password, remark, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                    '''INSERT OR REPLACE INTO vcenter_config
+                       (ip, user, password, remark, root_password, region, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                    (ip, user, password, remark, root_password, region, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                 )
                 conn.commit()
                 return True
             except Exception as e:
-                print(f"添加vCenter失败: {e}")
+                print(f"娣诲姞vCenter澶辫触: {e}")
                 return False
             finally:
                 conn.close()
@@ -140,7 +211,10 @@ class Database:
     def get_vcenters(self):
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT id, ip, user, password, remark, created_at, updated_at FROM vcenter_config ORDER BY ip')
+        cursor.execute(
+            'SELECT id, ip, user, password, remark, created_at, updated_at, root_password, region '
+            'FROM vcenter_config ORDER BY ip'
+        )
         result = cursor.fetchall()
         conn.close()
         return result
@@ -153,23 +227,33 @@ class Database:
             conn.commit()
             conn.close()
 
-    def update_vcenter(self, vc_id, ip, user, password, remark):
+    def update_vcenter(self, vc_id, ip, user, password, remark, root_password='', region=''):
         with self._lock:
             conn = self.get_connection()
             cursor = conn.cursor()
             cursor.execute(
-                'UPDATE vcenter_config SET ip=?, user=?, password=?, remark=?, updated_at=? WHERE id=?',
-                (ip, user, password, remark, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), vc_id)
+                'UPDATE vcenter_config SET ip=?, user=?, password=?, remark=?, root_password=?, region=?, updated_at=? WHERE id=?',
+                (ip, user, password, remark, root_password, region, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), vc_id)
             )
             conn.commit()
             conn.close()
 
-    def save_host_inspect(self, hosts_data):
+    def get_vcenter_region_map(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT ip, COALESCE(region, "") FROM vcenter_config')
+        rows = cursor.fetchall()
+        conn.close()
+        return {ip: region or '' for ip, region in rows}
+
+    def save_host_inspect(self, hosts_data, vc_ip=None):
         with self._lock:
             conn = self.get_connection()
             cursor = conn.cursor()
 
-            if hosts_data:
+            if vc_ip:
+                cursor.execute('DELETE FROM host_inspect WHERE vc_ip = ?', (vc_ip,))
+            elif hosts_data:
                 vc_ip = hosts_data[0].get('vc_ip')
                 cursor.execute('DELETE FROM host_inspect WHERE vc_ip = ?', (vc_ip,))
 
@@ -178,15 +262,16 @@ class Database:
                     INSERT INTO host_inspect (
                         vc_ip, host_name, cluster, status, esxi_version, vendor, model,
                         serial_number, cpu_model, cpu_ghz, cpu_count, cpu_cores,
-                        memory_gb, uptime_days, cpu_usage, memory_usage, vmk_adapters, cert_expiry
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        memory_gb, uptime_days, cpu_usage, memory_usage, cert_expiring_soon,
+                        vmk_adapters, cert_expiry
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     host.get('vc_ip'), host.get('host_name'), host.get('cluster'), host.get('status'),
                     host.get('esxi_version'), host.get('vendor'), host.get('model'),
                     host.get('serial_number'), host.get('cpu_model'), host.get('cpu_ghz'),
                     host.get('cpu_count'), host.get('cpu_cores'), host.get('memory_gb'),
                     host.get('uptime_days'), host.get('cpu_usage'), host.get('memory_usage'),
-                    host.get('vmk_adapters'), host.get('cert_expiry')
+                    host.get('cert_expiring_soon', '否'), host.get('vmk_adapters'), host.get('cert_expiry')
                 ))
             conn.commit()
             conn.close()
@@ -206,12 +291,12 @@ class Database:
             if where_clause:
                 where_clause += ' AND (host_name LIKE ? OR cluster LIKE ?)'
             else:
-                where_clause += ' WHERE host_name LIKE ? OR cluster LIKE ?'
+                where_clause += ' WHERE (host_name LIKE ? OR cluster LIKE ?)'
             params.extend([f'%{search}%', f'%{search}%'])
 
         if filters:
             for key, value in filters.items():
-                if value and value != '全部':
+                if value and value != '鍏ㄩ儴':
                     col_map = {
                         'vc_ip': 'vc_ip',
                         'status': 'status',
@@ -233,7 +318,7 @@ class Database:
         offset = (page - 1) * page_size
         sql = f'''SELECT id, vc_ip, host_name, cluster, status, esxi_version, vendor, model,
                   serial_number, cpu_model, cpu_ghz, cpu_count, cpu_cores, memory_gb,
-                  uptime_days, cpu_usage, memory_usage, vmk_adapters, cert_expiry, inspect_time
+                  uptime_days, cpu_usage, memory_usage, cert_expiring_soon, vmk_adapters, cert_expiry, inspect_time
                   FROM host_inspect{where_clause} ORDER BY host_name LIMIT ? OFFSET ?'''
         params.extend([page_size, offset])
         cursor.execute(sql, params)
@@ -267,12 +352,70 @@ class Database:
         conn.close()
         return result
 
-    def save_vm_inspect(self, vms_data):
+    def save_local_disk_inspect(self, disks_data):
         with self._lock:
             conn = self.get_connection()
             cursor = conn.cursor()
 
-            if vms_data:
+            if disks_data:
+                vc_ip = disks_data[0].get('vc_ip')
+                cursor.execute('DELETE FROM local_disk_inspect WHERE vc_ip = ?', (vc_ip,))
+
+            for disk in disks_data:
+                cursor.execute('''
+                    INSERT INTO local_disk_inspect (
+                        vc_ip, datacenter, cluster, host_name, disk_name, datastore,
+                        total_gb, used_gb, usage_percent
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    disk.get('vc_ip'), disk.get('datacenter'), disk.get('cluster'),
+                    disk.get('host_name'), disk.get('disk_name'), disk.get('datastore'),
+                    disk.get('total_gb'), disk.get('used_gb'), disk.get('usage_percent')
+                ))
+            conn.commit()
+            conn.close()
+
+    def get_local_disk_inspect(self, vc_ip=None, search='', page=1, page_size=50):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        where_clause = ''
+        params = []
+
+        if vc_ip:
+            where_clause += ' WHERE vc_ip = ?'
+            params.append(vc_ip)
+
+        if search:
+            if where_clause:
+                where_clause += ' AND host_name LIKE ?'
+            else:
+                where_clause += ' WHERE host_name LIKE ?'
+            params.append(f'%{search}%')
+
+        count_sql = f'SELECT COUNT(*) FROM local_disk_inspect{where_clause}'
+        cursor.execute(count_sql, params)
+        total = cursor.fetchone()[0]
+
+        offset = (page - 1) * page_size
+        sql = f'''SELECT id, vc_ip, datacenter, cluster, host_name, disk_name, datastore,
+                  total_gb, used_gb, usage_percent, inspect_time
+                  FROM local_disk_inspect{where_clause} ORDER BY host_name LIMIT ? OFFSET ?'''
+        params.extend([page_size, offset])
+        cursor.execute(sql, params)
+        result = cursor.fetchall()
+        conn.close()
+
+        return result, total
+
+    def save_vm_inspect(self, vms_data, vc_ip=None):
+        with self._lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+
+            if vc_ip:
+                cursor.execute('DELETE FROM vm_inspect WHERE vc_ip = ?', (vc_ip,))
+            elif vms_data:
                 vc_ip = vms_data[0].get('vc_ip')
                 cursor.execute('DELETE FROM vm_inspect WHERE vc_ip = ?', (vc_ip,))
 
@@ -280,14 +423,18 @@ class Database:
                 cursor.execute('''
                     INSERT INTO vm_inspect (
                         vc_ip, vm_name, cluster, host, power_state, ip_address, memory_gb,
-                        cpu_count, uuid, annotation, tools_status, uptime_days, datastore,
-                        disks, used_space_gb, folder
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        cpu_count, uuid, annotation, system_version, guest_os, cpu_hot_add_enabled,
+                        memory_hot_add_enabled, tools_status, uptime_days, datastore,
+                        vm_portgroups, nsx_managed, disks, used_space_gb, folder
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     vm.get('vc_ip'), vm.get('vm_name'), vm.get('cluster'), vm.get('host'),
                     vm.get('power_state'), vm.get('ip_address'), vm.get('memory_gb'),
-                    vm.get('cpu_count'), vm.get('uuid'), vm.get('annotation'), vm.get('tools_status'),
-                    vm.get('uptime_days'), vm.get('datastore'), vm.get('disks'), vm.get('used_space_gb'),
+                    vm.get('cpu_count'), vm.get('uuid'), vm.get('annotation'),
+                    vm.get('system_version'), vm.get('guest_os'), vm.get('cpu_hot_add_enabled', '否'),
+                    vm.get('memory_hot_add_enabled', '否'), vm.get('tools_status'),
+                    vm.get('uptime_days'), vm.get('datastore'), vm.get('vm_portgroups', ''), vm.get('nsx_managed', '否'),
+                    vm.get('disks'), vm.get('used_space_gb'),
                     vm.get('folder', '')
                 ))
             conn.commit()
@@ -308,12 +455,12 @@ class Database:
             if where_clause:
                 where_clause += ' AND (vm_name LIKE ? OR ip_address LIKE ?)'
             else:
-                where_clause += ' WHERE vm_name LIKE ? OR ip_address LIKE ?'
+                where_clause += ' WHERE (vm_name LIKE ? OR ip_address LIKE ?)'
             params.extend([f'%{search}%', f'%{search}%'])
 
         if filters:
             for key, value in filters.items():
-                if value and value != '全部':
+                if value and value != '鍏ㄩ儴':
                     col_map = {
                         'vc_ip': 'vc_ip',
                         'cluster': 'cluster',
@@ -334,14 +481,36 @@ class Database:
 
         offset = (page - 1) * page_size
         sql = f'''SELECT id, vc_ip, vm_name, cluster, host, power_state, ip_address, memory_gb,
-                  cpu_count, uuid, annotation, tools_status, uptime_days, datastore, disks,
-                  used_space_gb, folder, inspect_time FROM vm_inspect{where_clause} ORDER BY vm_name LIMIT ? OFFSET ?'''
+                  cpu_count, uuid, annotation, system_version, guest_os, cpu_hot_add_enabled, memory_hot_add_enabled, tools_status, uptime_days, datastore, disks,
+                  vm_portgroups, nsx_managed, used_space_gb, folder, inspect_time FROM vm_inspect{where_clause} ORDER BY vm_name LIMIT ? OFFSET ?'''
         params.extend([page_size, offset])
         cursor.execute(sql, params)
         result = cursor.fetchall()
         conn.close()
 
         return result, total
+
+    def clear_vm_inspect(self, vc_ip=None):
+        with self._lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            if vc_ip:
+                cursor.execute('DELETE FROM vm_inspect WHERE vc_ip = ?', (vc_ip,))
+            else:
+                cursor.execute('DELETE FROM vm_inspect')
+            conn.commit()
+            conn.close()
+
+    def clear_host_inspect(self, vc_ip=None):
+        with self._lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            if vc_ip:
+                cursor.execute('DELETE FROM host_inspect WHERE vc_ip = ?', (vc_ip,))
+            else:
+                cursor.execute('DELETE FROM host_inspect')
+            conn.commit()
+            conn.close()
 
     def get_all_vms_for_batch(self):
         conn = self.get_connection()
@@ -370,15 +539,109 @@ class Database:
     def get_host_by_uuid(self, uuid):
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT vc_ip, host_name, cluster, host FROM host_inspect WHERE uuid = ?', (uuid,))
+        cursor.execute('SELECT vc_ip, vm_name, cluster, host FROM vm_inspect WHERE uuid = ?', (uuid,))
         result = cursor.fetchone()
         conn.close()
         return result
 
     def clear_old_data(self, table_name, days=30):
+        if table_name not in self.ALLOWED_HISTORY_TABLES:
+            raise ValueError(f"涓嶅厑璁告竻鐞嗙殑鏁版嵁琛? {table_name}")
         with self._lock:
             conn = self.get_connection()
             cursor = conn.cursor()
             cursor.execute(f"DELETE FROM {table_name} WHERE inspect_time < datetime('now', '-{days} days')")
             conn.commit()
             conn.close()
+
+    def _init_scheduled_tasks_table(self):
+        with self._lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_name TEXT NOT NULL,
+                    task_type TEXT NOT NULL,
+                    schedule_type TEXT NOT NULL,
+                    schedule_time TEXT NOT NULL,
+                    schedule_day TEXT,
+                    save_path TEXT,
+                    enabled INTEGER DEFAULT 1,
+                    last_run TEXT,
+                    last_status TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_tasks_enabled_time ON scheduled_tasks(enabled, schedule_type, schedule_time, schedule_day)')
+            conn.commit()
+            conn.close()
+
+    def add_scheduled_task(self, task_name, task_type, schedule_type, schedule_time, schedule_day=None, save_path=None):
+        with self._lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO scheduled_tasks (task_name, task_type, schedule_type, schedule_time, schedule_day, save_path, enabled)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+            ''', (task_name, task_type, schedule_type, schedule_time, schedule_day, save_path))
+            conn.commit()
+            conn.close()
+            return cursor.lastrowid
+
+    def get_scheduled_tasks(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM scheduled_tasks ORDER BY created_at DESC')
+        result = cursor.fetchall()
+        conn.close()
+        return result
+
+    def get_enabled_tasks(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM scheduled_tasks WHERE enabled = 1 ORDER BY created_at DESC')
+        result = cursor.fetchall()
+        conn.close()
+        return result
+
+    def update_task(self, task_id, **kwargs):
+        with self._lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            for key, value in kwargs.items():
+                if key in ('enabled', 'last_run', 'last_status'):
+                    cursor.execute(f'UPDATE scheduled_tasks SET {key} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (value, task_id))
+            conn.commit()
+            conn.close()
+
+    def delete_task(self, task_id):
+        with self._lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM scheduled_tasks WHERE id = ?', (task_id,))
+            conn.commit()
+            conn.close()
+
+    def update_scheduled_task(self, task_id, task_name, task_type, schedule_type, schedule_time, schedule_day=None, save_path=None):
+        with self._lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE scheduled_tasks
+                SET task_name = ?, task_type = ?, schedule_type = ?, schedule_time = ?,
+                    schedule_day = ?, save_path = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (task_name, task_type, schedule_type, schedule_time, schedule_day, save_path, task_id))
+            conn.commit()
+            conn.close()
+
+    def update_task_status(self, task_id, status):
+        with self._lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('UPDATE scheduled_tasks SET last_run = CURRENT_TIMESTAMP, last_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (status, task_id))
+            conn.commit()
+            conn.close()
+

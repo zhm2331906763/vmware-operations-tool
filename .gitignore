@@ -4,6 +4,10 @@ dist/
 *.exe
 *.spec
 
+# Local test/build state
+.pytest_cache/
+3.4
+
 # Python
 __pycache__/
 *.py[cod]
@@ -32,6 +36,7 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
+src/src/db/
 
 # Temporary files
 *.tmp

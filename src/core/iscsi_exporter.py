@@ -4,6 +4,8 @@ from pyVim.connect import SmartConnect, Disconnect
 from pyVmomi import vim
 from openpyxl import Workbook
 from openpyxl.styles import Alignment
+from src.db.database import Database
+from src.core.excel_formatter import format_excel_file
 
 
 class ISCSIExporter:
@@ -124,18 +126,21 @@ class ISCSIExporter:
     def save_to_excel(self, file_path):
         if not self.results:
             return False
+
+        region_map = Database().get_vcenter_region_map()
         
         wb = Workbook()
         ws = wb.active
         ws.title = "ESXi_iSCSI信息"
         
-        headers = ['vCenter', '集群', '主机', 'IQN标识符', '动态目标(SendTarget)', '静态目标(StaticTarget)']
+        headers = ['区域', 'vCenter', '集群', '主机', 'IQN标识符', '动态目标(SendTarget)', '静态目标(StaticTarget)']
         ws.append(headers)
         
         wrap_alignment = Alignment(wrap_text=True, vertical='top')
         
         for result in self.results:
             ws.append([
+                region_map.get(str(result['vCenter']), ''),
                 result['vCenter'],
                 result['集群'],
                 result['主机'],
@@ -145,15 +150,17 @@ class ISCSIExporter:
             ])
             
             last_row = ws.max_row
-            ws.cell(row=last_row, column=5).alignment = wrap_alignment
             ws.cell(row=last_row, column=6).alignment = wrap_alignment
+            ws.cell(row=last_row, column=7).alignment = wrap_alignment
         
         ws.column_dimensions['A'].width = 18
-        ws.column_dimensions['B'].width = 25
-        ws.column_dimensions['C'].width = 30
-        ws.column_dimensions['D'].width = 60
-        ws.column_dimensions['E'].width = 45
-        ws.column_dimensions['F'].width = 60
+        ws.column_dimensions['B'].width = 18
+        ws.column_dimensions['C'].width = 25
+        ws.column_dimensions['D'].width = 30
+        ws.column_dimensions['E'].width = 60
+        ws.column_dimensions['F'].width = 45
+        ws.column_dimensions['G'].width = 60
         
         wb.save(file_path)
+        format_excel_file(file_path)
         return True

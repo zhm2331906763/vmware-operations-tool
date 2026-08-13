@@ -29,8 +29,11 @@ class VMCloner:
             if not datastore:
                 return False, f"找不到存储 '{config['datastore_name']}'"
             
+            use_host_for_relocate = target_host
             if isinstance(target_host.parent, vim.ClusterComputeResource):
                 resource_pool = target_host.parent.resourcePool
+                # 集群内克隆时让 vCenter 自行挑选可达主机，避免并发 clone 强绑 host 引发 HostConnectFault
+                use_host_for_relocate = None
             else:
                 resource_pool = target_host.resourcePool
             
@@ -135,7 +138,11 @@ class VMCloner:
             clonespec = vim.vm.CloneSpec(
                 powerOn=False,
                 template=False,
-                location=vim.vm.RelocateSpec(datastore=datastore, pool=resource_pool, host=target_host),
+                location=vim.vm.RelocateSpec(
+                    datastore=datastore,
+                    pool=resource_pool,
+                    host=use_host_for_relocate,
+                ),
                 config=vmconf,
                 customization=customization_spec
             )
